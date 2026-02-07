@@ -1,83 +1,214 @@
-# План имплементации опциональной TOTP-авторизации при каждом входе в веб-панель
+# План имплементации Firewall для API (с сохранением открытого Dashboard)
 
 ## 1. Цель и границы
-- Добавить опциональный режим: при включении пользователь обязан пройти TOTP-проверку на каждом новом входе в веб-панель.
-- Режим по умолчанию: выключен (обратная совместимость).
-- Область: только dashboard (`/dashboard` и dashboard API), без влияния на proxy API-контракты для клиентов.
 
-## 2. Архитектурное решение
-- Добавить отдельный модуль `app/modules/dashboard_auth/`:
-  - `api.py` — endpoints для логина/логаута/проверки сессии/TOTP setup.
-  - `service.py` — бизнес-логика сессий и TOTP-валидации.
-  - `repository.py` — чтение/обновление auth-полей в `dashboard_settings`.
-  - `schemas.py` — строго типизированные Pydantic-схемы запросов/ответов.
-- Подключить модуль через контекст в `app/dependencies.py` (по текущему DI-паттерну проекта).
+- Цель: ограничить доступ к API allowlist-списком IP адресов.
+- Dashboard должен остаться без ограничений firewall:
+  - UI: `/dashboard`, `/accounts`, `/settings`, новая вкладка `/firewall`
+  - Dashboard API: `/api/*` (как сейчас, под текущей TOTP-логикой)
+- Под защиту firewall попадают API-эндпоинты для клиентов:
+  - обязательно: `/backend-api/codex/*`
+  - рекомендуется также: `/v1/*` (чтобы не было обхода через альтернативный вход)
 
-## 3. Данные и миграции
-- Расширить `DashboardSettings` (`app/db/models.py`) минимальным набором полей:
-  - `totp_required_on_login: bool` (флаг опциональности).
-  - `totp_secret_encrypted: bytes | None` (секрет TOTP, шифруется).
-  - `totp_last_verified_step: int | None` (защита от replay в пределах timestep).
-- Добавить Alembic-миграцию в `app/db/migrations/versions/`:
-  - новые nullable поля;
-  - `totp_required_on_login` с default `False`.
-- Не дублировать состояние (`totp_enabled` отдельно не хранить): вычислять как `totp_secret_encrypted is not None`.
+## 2. Поведение firewall (договор)
 
-## 4. Backend поток аутентификации
-- Ввести cookie-сессию панели (`HttpOnly`, `Secure` при HTTPS, `SameSite=Lax`) с признаком `totp_verified`.
-- Добавить guard для dashboard маршрутов/API:
-  - если сессии нет -> `401`/редирект на login-экран;
-  - если `totp_required_on_login=True` и TOTP не пройден -> `401`.
-- Endpoint-ы (пример):
-  - `GET /api/dashboard-auth/session` — состояние сессии и требование TOTP.
-  - `POST /api/dashboard-auth/login` — старт логина (создание промежуточной сессии).
-  - `POST /api/dashboard-auth/totp/verify` — проверка 6-значного кода и повышение сессии до `totp_verified`.
-  - `POST /api/dashboard-auth/totp/setup/start` — генерация секрета + `otpauth://` URI.
-  - `POST /api/dashboard-auth/totp/setup/confirm` — подтверждение кода и сохранение секрета.
-  - `POST /api/dashboard-auth/totp/disable` — отключение TOTP после успешной верификации текущей сессии.
-  - `POST /api/dashboard-auth/logout` — удаление сессии.
+- Модель: allowlist.
+- Если список IP пустой: firewall в пассивном режиме (доступ к API открыт всем).
+- Если список не пустой: доступ только IP из списка.
+- При блокировке:
+  - HTTP `403`
+  - тело ошибки в OpenAI-формате: `{"error":{"code":"ip_forbidden","message":"...","type":"access_error"}}`
 
-## 5. TOTP-логика и безопасность
-- Использовать RFC 6238 (30s timestep, 6 digits, SHA-1 совместимость с Google Authenticator/Authy).
-- Секрет хранить только в зашифрованном виде (через существующий крипто-слой проекта).
-- Принять ограниченное окно дрейфа времени (`-1/0/+1` timestep), но блокировать повторный прием того же timestep через `totp_last_verified_step`.
-- Добавить rate limit на попытки ввода кода (например, in-memory счетчик по сессии/IP с backoff).
-- Логировать только факт успеха/ошибки, без кода и без секрета.
+## 3. Архитектура по слоям
 
-## 6. Изменения в модуле settings
-- Расширить:
-  - `app/modules/settings/schemas.py` (добавить `totp_required_on_login: bool`, `totp_configured: bool`).
-  - `app/modules/settings/service.py` и `repository.py` (чтение/обновление нового флага).
-- `totp_configured` — вычисляемое поле ответа (из `totp_secret_encrypted`), не хранится отдельно.
+### 3.1 База данных
 
-## 7. Изменения фронтенда (`app/static/*`)
-- Добавить login/TOTP gate до загрузки основного dashboard-контента.
-- Добавить в Settings UI:
-  - переключатель `Require TOTP on every login`;
-  - блок onboarding TOTP: показать QR/секрет, поле подтверждения кода, кнопки enable/disable.
-- Обработать состояния:
-  - TOTP required but not configured -> нельзя включить флаг, показать явную ошибку.
-  - expired session -> возврат на login gate.
+Добавить таблицу allowlist:
 
-## 8. Тестирование
-- Unit (`tests/unit`):
-  - генерация/проверка TOTP, replay-protection, time-drift window;
-  - сервисные кейсы `required on/off`.
-- Integration (`tests/integration`):
-  - полный flow setup -> login -> totp verify -> доступ к dashboard API;
-  - отрицательные кейсы (неверный код, повтор кода, выключенный TOTP).
-- Обновить контрактные тесты settings API под новые поля.
+- Таблица: `api_firewall_allowlist`
+- Поля:
+  - `ip_address` (`String`, PK, уникальный, в каноническом виде)
+  - `created_at` (`DateTime`, `server_default=func.now()`, not null)
 
-## 9. Порядок внедрения
-1. Миграция + модель `DashboardSettings`.
-2. `dashboard_auth` модуль (schemas/repository/service/api) и DI-контекст.
-3. Guard/middleware для dashboard endpoints.
-4. Обновление settings API/сервиса.
-5. Frontend login gate и settings TOTP UI.
-6. Unit + integration тесты, регрессия существующих dashboard сценариев.
+Файлы:
 
-## 10. Критерии готовности (DoD)
-- При `totp_required_on_login=false` текущий UX входа не ломается.
-- При `totp_required_on_login=true` доступ к панели невозможен без успешной TOTP-проверки.
-- Секрет не появляется в логах и не хранится в открытом виде.
-- Все новые/измененные API контракты покрыты тестами и проходят CI.
+- `app/db/models.py` (новая ORM-модель + index при необходимости)
+- `app/db/migrations/versions/007_add_api_firewall_allowlist.py` (идемпотентная миграция)
+- `app/db/migrations/__init__.py` (добавить migration entry)
+
+### 3.2 Новый модуль `firewall`
+
+Создать модуль по принятой структуре:
+
+- `app/modules/firewall/schemas.py`
+- `app/modules/firewall/repository.py`
+- `app/modules/firewall/service.py`
+- `app/modules/firewall/api.py`
+- `app/modules/firewall/__init__.py`
+
+Контракты (typed):
+
+- Pydantic input/output через `DashboardModel`
+- Внутренние payload-и через dataclass (service layer)
+
+Предлагаемые API:
+
+1. `GET /api/firewall/ips`
+   - Response:
+     - `entries: [{ ipAddress: str, createdAt: datetime }]`
+     - `mode: "allow_all" | "allowlist_active"`
+2. `POST /api/firewall/ips`
+   - Request: `{ ipAddress: str }`
+   - Response: добавленная запись
+   - Ошибки:
+     - `400` invalid IP
+     - `409` duplicate
+3. `DELETE /api/firewall/ips/{ip_address}`
+   - Response: `{ status: "deleted" }`
+   - Ошибка `404` если IP не найден
+
+Валидация IP:
+
+- Использовать `ipaddress.ip_address(...)`
+- Нормализовать:
+  - IPv4 как есть
+  - IPv6 в канонической форме (`str(ip_obj)`)
+
+### 3.3 DI и зависимости
+
+Добавить контекст в `app/dependencies.py`:
+
+- `FirewallContext` с `session`, `repository`, `service`
+- провайдер `get_firewall_context(...)`
+
+### 3.4 Middleware для защиты API
+
+Добавить новый middleware, например:
+
+- `app/core/middleware/api_firewall.py`
+
+Логика:
+
+1. Проверить `request.url.path`.
+2. Если путь не относится к защищаемым префиксам, пропустить.
+3. Определить клиентский IP.
+4. Получить текущий allowlist.
+5. Принять решение allow/deny.
+6. При deny вернуть `403` в OpenAI-формате.
+
+Подключение:
+
+- `app/core/middleware/__init__.py`
+- `app/main.py` (добавить middleware до router include)
+
+## 4. Определение клиентского IP (важно)
+
+Нужен явный, безопасный режим:
+
+- Новый конфиг в `app/core/config/settings.py`:
+  - `firewall_trust_proxy_headers: bool = False`
+
+Правило:
+
+1. Если `firewall_trust_proxy_headers = True`, брать IP из первого значения `X-Forwarded-For`.
+2. Иначе использовать `request.client.host`.
+
+Операционный комментарий:
+
+- За reverse-proxy включать trust only если прокси гарантированно перезаписывает `X-Forwarded-For`.
+- Иначе оставить `False` (защита от spoofing).
+
+## 5. Изменения dashboard (новая вкладка Firewall)
+
+### 5.1 Роутинг SPA
+
+Файлы:
+
+- `app/main.py`: добавить `@app.get("/firewall") -> index.html`
+- `app/static/index.js`: добавить страницу в `PAGES`
+- `app/static/index.html`: добавить `tabpanel` `tab-firewall`
+
+### 5.2 UI/UX вкладки
+
+Во вкладке `Firewall`:
+
+- Текущее состояние:
+  - `Mode: allow_all / allowlist_active`
+  - Количество разрешенных IP
+- Форма добавления IP:
+  - input + кнопка `Add`
+  - inline валидация
+- Список разрешенных IP:
+  - таблица/лист
+  - `createdAt`
+  - кнопка `Remove`
+
+### 5.3 Frontend state/actions
+
+Файл: `app/static/index.js`
+
+- `API_ENDPOINTS`:
+  - `firewallIps: "/api/firewall/ips"`
+  - `firewallIpDelete: (ip) => ...`
+- Новый state-срез `firewall`
+- Методы:
+  - `fetchFirewallIps()`
+  - `addFirewallIp()`
+  - `removeFirewallIp()`
+  - `refreshFirewall()` (в `refreshAll` добавить загрузку firewall-данных)
+
+## 6. Error handling и контракты ответов
+
+- Ошибки dashboard API (`/api/firewall/*`) использовать `dashboard_error(...)`.
+- Ошибки firewall-блокировки на `/backend-api/codex/*` и `/v1/*` использовать `openai_error(...)`.
+- Не смешивать форматы между dashboard и proxy API.
+
+## 7. План тестирования
+
+### 7.1 Integration tests
+
+Добавить:
+
+- `tests/integration/test_firewall_api.py`
+  - list empty
+  - add valid IPv4
+  - add valid IPv6
+  - duplicate -> 409
+  - invalid IP -> 400
+  - delete success / delete missing -> 404
+
+- `tests/integration/test_api_firewall_middleware.py`
+  - empty list => `/backend-api/codex/responses` не блокируется
+  - non-empty + allowed IP => доступ есть
+  - non-empty + denied IP => `403`
+  - `/dashboard` и `/api/settings` не ограничиваются firewall
+  - (если включаем scope) `/v1/responses` тоже защищен
+
+### 7.2 Unit tests
+
+Добавить:
+
+- `tests/unit/test_firewall_service.py`
+  - нормализация/валидация IP
+  - режим `allow_all`/`allowlist_active`
+- `tests/unit/test_firewall_ip_resolution.py`
+  - источник IP при `firewall_trust_proxy_headers=True/False`
+
+## 8. Последовательность реализации (рекомендуемая)
+
+1. DB модель + migration + подключение migration.
+2. Модуль `firewall` (schemas/repository/service/api).
+3. DI context в `app/dependencies.py`.
+4. Middleware + подключение в `app/main.py`.
+5. SPA route `/firewall` + tab в `index.html`/`index.js`.
+6. Frontend CRUD для IP.
+7. Интеграционные и unit тесты.
+8. Финальная проверка: dashboard работает как раньше, API фильтруется по allowlist.
+
+## 9. Критерии готовности (DoD)
+
+- Можно добавить/удалить IP через вкладку `Firewall`.
+- При непустом allowlist API недоступен с неразрешенного IP (`403`).
+- Dashboard остается доступным и функциональным.
+- Все новые контракты покрыты тестами.
+- Миграции идемпотентны и проходят в существующем потоке `run_migrations`.
