@@ -18,6 +18,9 @@
 		oauthStatus: "/api/oauth/status",
 		oauthComplete: "/api/oauth/complete",
 		settings: "/api/settings",
+		firewallIps: "/api/firewall/ips",
+		firewallIpDelete: (ipAddress) =>
+			`/api/firewall/ips/${encodeURIComponent(ipAddress)}`,
 		dashboardAuthSession: "/api/dashboard-auth/session",
 		dashboardAuthTotpVerify: "/api/dashboard-auth/totp/verify",
 		dashboardAuthTotpSetupStart: "/api/dashboard-auth/totp/setup/start",
@@ -47,6 +50,13 @@
 			label: "Settings",
 			title: "Codex Load Balancer - Settings",
 			path: "/settings",
+		},
+		{
+			id: "firewall",
+			tabId: "tab-firewall",
+			label: "Firewall",
+			title: "Codex Load Balancer - Firewall",
+			path: "/firewall",
 		},
 	];
 
@@ -1381,9 +1391,26 @@
 		totpConfigured: Boolean(payload?.totpConfigured),
 	});
 
+	const normalizeFirewallPayload = (payload) => ({
+		mode: payload?.mode === "allowlist_active" ? "allowlist_active" : "allow_all",
+		entries: Array.isArray(payload?.entries)
+			? payload.entries
+				.map((entry) => ({
+					ipAddress: String(entry?.ipAddress ?? "").trim(),
+					createdAt: entry?.createdAt ?? null,
+				}))
+				.filter((entry) => entry.ipAddress)
+			: [],
+	});
+
 	const fetchSettings = async () => {
 		const payload = await fetchJson(API_ENDPOINTS.settings, "settings");
 		return normalizeSettingsPayload(payload);
+	};
+
+	const fetchFirewallIps = async () => {
+		const payload = await fetchJson(API_ENDPOINTS.firewallIps, "firewall IPs");
+		return normalizeFirewallPayload(payload);
 	};
 
 	const registerApp = () => {
@@ -1425,6 +1452,13 @@
 					code: "",
 					isSubmitting: false,
 				},
+				isSaving: false,
+			},
+			firewall: {
+				mode: "allow_all",
+				entries: [],
+				ipInput: "",
+				isLoading: false,
 				isSaving: false,
 			},
 			accounts: {
@@ -1814,6 +1848,7 @@
 						requestLogsResult,
 						requestLogOptionsResult,
 						settingsResult,
+						firewallResult,
 					] = await Promise.allSettled([
 						fetchAccounts(),
 						fetchUsageSummary(),
@@ -1822,6 +1857,7 @@
 						fetchRequestLogs(params),
 						fetchRequestLogOptions({}),
 						fetchSettings(),
+						fetchFirewallIps(),
 					]);
 
 					const errors = [];
@@ -1876,6 +1912,12 @@
 						errors.push(settingsResult.reason);
 					}
 
+					const firewall =
+						firewallResult.status === "fulfilled" ? firewallResult.value : null;
+					if (firewallResult.status === "rejected") {
+						errors.push(firewallResult.reason);
+					}
+
 					const mergedAccounts = mergeUsageIntoAccounts(
 						accountsResult.value,
 						primaryUsage,
@@ -1892,6 +1934,7 @@
 								this.filtersApplied,
 							),
 							settings,
+							firewall,
 						},
 						preferredId,
 					);
@@ -1951,6 +1994,10 @@
 					);
 					this.settings.totpConfigured = Boolean(data.settings.totpConfigured);
 				}
+				if (data.firewall) {
+					this.firewall.mode = data.firewall.mode;
+					this.firewall.entries = data.firewall.entries;
+				}
 				this.ui.usageWindows = buildUsageWindowConfig(data.summary);
 				this.dashboard = buildDashboardView(this);
 				this.syncAccountSearchSelection();
@@ -1993,6 +2040,100 @@
 					});
 				} finally {
 					this.settings.isSaving = false;
+				}
+			},
+			firewallModeLabel(mode) {
+				return mode === "allowlist_active" ? "Allowlist active" : "Allow all";
+			},
+			async refreshFirewall() {
+				if (this.firewall.isLoading) {
+					return;
+				}
+				this.firewall.isLoading = true;
+				try {
+					const payload = await fetchFirewallIps();
+					this.firewall.mode = payload.mode;
+					this.firewall.entries = payload.entries;
+				} catch (error) {
+					this.openMessageBox({
+						tone: "error",
+						title: "Firewall load failed",
+						message: error.message || "Failed to load firewall IPs.",
+					});
+				} finally {
+					this.firewall.isLoading = false;
+				}
+			},
+			async addFirewallIp() {
+				if (this.firewall.isSaving) {
+					return;
+				}
+				const ipAddress = String(this.firewall.ipInput || "").trim();
+				if (!ipAddress) {
+					this.openMessageBox({
+						tone: "warning",
+						title: "IP required",
+						message: "Enter an IP address.",
+					});
+					return;
+				}
+				this.firewall.isSaving = true;
+				try {
+					await postJson(
+						API_ENDPOINTS.firewallIps,
+						{ ipAddress },
+						"add firewall IP",
+					);
+					this.firewall.ipInput = "";
+					await this.refreshFirewall();
+					this.openMessageBox({
+						tone: "success",
+						title: "Firewall updated",
+						message: "IP address added.",
+					});
+				} catch (error) {
+					this.openMessageBox({
+						tone: "error",
+						title: "Add IP failed",
+						message: error.message || "Failed to add IP address.",
+					});
+				} finally {
+					this.firewall.isSaving = false;
+				}
+			},
+			async removeFirewallIp(ipAddress) {
+				if (!ipAddress || this.firewall.isSaving) {
+					return;
+				}
+				const confirmed = await this.openConfirmBox({
+					title: "Remove IP?",
+					message: `Remove ${ipAddress} from firewall allowlist?`,
+					confirmLabel: "Remove",
+					cancelLabel: "Cancel",
+				});
+				if (!confirmed) {
+					return;
+				}
+				this.firewall.isSaving = true;
+				try {
+					await deleteJson(
+						API_ENDPOINTS.firewallIpDelete(ipAddress),
+						"remove firewall IP",
+					);
+					await this.refreshFirewall();
+					this.openMessageBox({
+						tone: "success",
+						title: "Firewall updated",
+						message: "IP address removed.",
+					});
+				} catch (error) {
+					this.openMessageBox({
+						tone: "error",
+						title: "Remove IP failed",
+						message: error.message || "Failed to remove IP address.",
+					});
+				} finally {
+					this.firewall.isSaving = false;
 				}
 			},
 			focusAccountSearch() {
