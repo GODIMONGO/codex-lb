@@ -63,6 +63,7 @@ class Settings(BaseSettings):
     usage_refresh_interval_seconds: int = 60
     encryption_key_file: Path = DEFAULT_ENCRYPTION_KEY_FILE
     database_migrations_fail_fast: bool = True
+    firewall_trust_proxy_headers: bool = False
     log_proxy_request_shape: bool = False
     log_proxy_request_shape_raw_cache_key: bool = False
     log_proxy_request_payload: bool = False

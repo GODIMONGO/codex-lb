@@ -112,6 +112,13 @@ class DashboardSettings(Base):
     )
 
 
+class ApiFirewallAllowlist(Base):
+    __tablename__ = "api_firewall_allowlist"
+
+    ip_address: Mapped[str] = mapped_column(String, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+
 Index("idx_usage_recorded_at", UsageHistory.recorded_at)
 Index("idx_usage_account_time", UsageHistory.account_id, UsageHistory.recorded_at)
 Index("idx_logs_account_time", RequestLog.account_id, RequestLog.requested_at)

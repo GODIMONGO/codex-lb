@@ -12,6 +12,8 @@ from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.service import AccountsService
 from app.modules.dashboard_auth.repository import DashboardAuthRepository
 from app.modules.dashboard_auth.service import DashboardAuthService, get_dashboard_session_store
+from app.modules.firewall.repository import FirewallRepository
+from app.modules.firewall.service import FirewallService
 from app.modules.oauth.service import OauthService
 from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.service import ProxyService
@@ -53,6 +55,13 @@ class DashboardAuthContext:
 @dataclass(slots=True)
 class ProxyContext:
     service: ProxyService
+
+
+@dataclass(slots=True)
+class FirewallContext:
+    session: AsyncSession
+    repository: FirewallRepository
+    service: FirewallService
 
 
 @dataclass(slots=True)
@@ -160,6 +169,14 @@ def get_oauth_context(
 def get_proxy_context() -> ProxyContext:
     service = ProxyService(repo_factory=_proxy_repo_context)
     return ProxyContext(service=service)
+
+
+def get_firewall_context(
+    session: AsyncSession = Depends(get_session),
+) -> FirewallContext:
+    repository = FirewallRepository(session)
+    service = FirewallService(repository)
+    return FirewallContext(session=session, repository=repository, service=service)
 
 
 def get_dashboard_auth_context(
