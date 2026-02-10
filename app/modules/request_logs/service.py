@@ -2,20 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import cast
 
-from app.core.usage.logs import (
-    RequestLogLike,
-    cached_input_tokens_from_log,
-    cost_from_log,
-    total_tokens_from_log,
+from app.modules.request_logs.mappers import (
+    QUOTA_CODES,
+    RATE_LIMIT_CODES,
+    to_request_log_entry,
 )
-from app.db.models import RequestLog
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.request_logs.schemas import RequestLogEntry
-
-RATE_LIMIT_CODES = {"rate_limit_exceeded", "usage_limit_reached"}
-QUOTA_CODES = {"insufficient_quota", "usage_not_included", "quota_exceeded"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +24,7 @@ class RequestLogStatusFilter:
     include_error_other: bool
     error_codes_in: list[str] | None
     error_codes_excluding: list[str] | None
+    force_empty: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +51,8 @@ class RequestLogsService:
         status: list[str] | None = None,
     ) -> list[RequestLogEntry]:
         status_filter = _map_status_filter(status)
+        if status_filter.force_empty:
+            return []
         logs = await self._repo.list_recent(
             limit=limit,
             offset=offset,
@@ -73,7 +70,7 @@ class RequestLogsService:
             error_codes_in=status_filter.error_codes_in,
             error_codes_excluding=status_filter.error_codes_excluding,
         )
-        return [_to_entry(log) for log in logs]
+        return [to_request_log_entry(log) for log in logs]
 
     async def list_filter_options(
         self,
@@ -82,6 +79,8 @@ class RequestLogsService:
         status: list[str] | None = None,
     ) -> RequestLogFilterOptions:
         status_filter = _map_status_filter(status)
+        if status_filter.force_empty:
+            return RequestLogFilterOptions(account_ids=[], model_options=[])
         account_ids, model_options = await self._repo.list_filter_options(
             since=since,
             until=until,
@@ -106,6 +105,7 @@ def _map_status_filter(status: list[str] | None) -> RequestLogStatusFilter:
             include_error_other=True,
             error_codes_in=None,
             error_codes_excluding=None,
+            force_empty=False,
         )
     normalized = {value.lower() for value in status if value}
     if not normalized or "all" in normalized:
@@ -114,12 +114,23 @@ def _map_status_filter(status: list[str] | None) -> RequestLogStatusFilter:
             include_error_other=True,
             error_codes_in=None,
             error_codes_excluding=None,
+            force_empty=False,
         )
 
     include_success = "ok" in normalized
     include_rate_limit = "rate_limit" in normalized
     include_quota = "quota" in normalized
     include_error_other = "error" in normalized
+    recognized = {"ok", "rate_limit", "quota", "error"}
+    has_recognized = any(value in recognized for value in normalized)
+    if not has_recognized:
+        return RequestLogStatusFilter(
+            include_success=False,
+            include_error_other=False,
+            error_codes_in=None,
+            error_codes_excluding=None,
+            force_empty=True,
+        )
 
     error_codes_in: set[str] = set()
     if include_rate_limit:
@@ -132,32 +143,5 @@ def _map_status_filter(status: list[str] | None) -> RequestLogStatusFilter:
         include_error_other=include_error_other,
         error_codes_in=sorted(error_codes_in) if error_codes_in else None,
         error_codes_excluding=sorted(RATE_LIMIT_CODES | QUOTA_CODES) if include_error_other else None,
-    )
-
-
-def _log_status(log: RequestLog) -> str:
-    if log.status == "success":
-        return "ok"
-    if log.error_code in RATE_LIMIT_CODES:
-        return "rate_limit"
-    if log.error_code in QUOTA_CODES:
-        return "quota"
-    return "error"
-
-
-def _to_entry(log: RequestLog) -> RequestLogEntry:
-    log_like = cast(RequestLogLike, log)
-    return RequestLogEntry(
-        requested_at=log.requested_at,
-        account_id=log.account_id,
-        request_id=log.request_id,
-        model=log.model,
-        reasoning_effort=log.reasoning_effort,
-        status=_log_status(log),
-        error_code=log.error_code,
-        error_message=log.error_message,
-        tokens=total_tokens_from_log(log_like),
-        cached_input_tokens=cached_input_tokens_from_log(log_like),
-        cost_usd=cost_from_log(log_like, precision=6),
-        latency_ms=log.latency_ms,
+        force_empty=False,
     )

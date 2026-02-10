@@ -23,6 +23,7 @@ from app.core.errors import openai_error, response_failed_event
 from app.core.openai.models import OpenAIResponsePayload
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
+from app.core.types import JsonValue
 from app.core.usage.types import UsageWindowRow
 from app.core.utils.request_id import ensure_request_id, get_request_id
 from app.core.utils.sse import format_sse_event
@@ -243,9 +244,36 @@ class ProxyService:
                         if refresh_exc.is_permanent:
                             await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
                         continue
-                    async for line in self._stream_once(account, payload, headers, request_id, False):
-                        yield line
-                    return
+                    try:
+                        async for line in self._stream_once(account, payload, headers, request_id, False):
+                            yield line
+                        return
+                    except _RetryableStreamError as retry_exc:
+                        await self._handle_stream_error(account, retry_exc.error, retry_exc.code)
+                        continue
+                    except ProxyResponseError as retry_exc:
+                        error = _parse_openai_error(retry_exc.payload)
+                        error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
+                        error_message = error.message if error else None
+                        error_type = error.type if error else None
+                        error_param = error.param if error else None
+                        await self._handle_stream_error(
+                            account,
+                            _upstream_error_from_openai(error),
+                            error_code,
+                        )
+                        if propagate_http_errors:
+                            raise
+                        event = response_failed_event(
+                            error_code,
+                            error_message or "Upstream error",
+                            error_type=error_type or "server_error",
+                            response_id=request_id,
+                            error_param=error_param,
+                        )
+                        _apply_error_metadata(event["response"]["error"], error)
+                        yield format_sse_event(event)
+                        return
                 error = _parse_openai_error(exc.payload)
                 error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
                 error_message = error.message if error else None
@@ -347,8 +375,10 @@ class ProxyService:
                     error_payload = _upstream_error_from_openai(error)
                     raise _RetryableStreamError(code, error_payload)
 
-            if event and event.type == "response.completed":
+            if event and event.type in ("response.completed", "response.incomplete"):
                 usage = event.response.usage if event.response else None
+                if event.type == "response.incomplete":
+                    status = "error"
             yield first
 
             async for line in iterator:
@@ -367,8 +397,10 @@ class ProxyService:
                             error.type if error else None,
                         )
                         error_message = error.message if error else None
-                    if event_type == "response.completed":
+                    if event_type in ("response.completed", "response.incomplete"):
                         usage = event.response.usage if event.response else None
+                        if event_type == "response.incomplete":
+                            status = "error"
                 yield line
         except ProxyResponseError as exc:
             error = _parse_openai_error(exc.payload)
@@ -556,15 +588,21 @@ def _hash_identifier(value: str) -> str:
     return f"sha256:{digest[:12]}"
 
 
-def _summarize_input(items: Sequence[object]) -> str:
-    if not items:
+def _summarize_input(items: JsonValue) -> str:
+    if items is None:
         return "0"
-    type_counts: dict[str, int] = {}
-    for item in items:
-        type_name = type(item).__name__
-        type_counts[type_name] = type_counts.get(type_name, 0) + 1
-    summary = ",".join(f"{key}={type_counts[key]}" for key in sorted(type_counts))
-    return f"{len(items)}({summary})"
+    if isinstance(items, str):
+        return "str"
+    if isinstance(items, Sequence) and not isinstance(items, (str, bytes, bytearray)):
+        if not items:
+            return "0"
+        type_counts: dict[str, int] = {}
+        for item in items:
+            type_name = type(item).__name__
+            type_counts[type_name] = type_counts.get(type_name, 0) + 1
+        summary = ",".join(f"{key}={type_counts[key]}" for key in sorted(type_counts))
+        return f"{len(items)}({summary})"
+    return type(items).__name__
 
 
 def _truncate_identifier(value: str, *, max_length: int = 96) -> str:

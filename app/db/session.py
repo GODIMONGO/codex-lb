@@ -9,9 +9,11 @@ import anyio
 from sqlalchemy import event
 from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool, StaticPool
 
 from app.core.config.settings import get_settings
 from app.db.migrations import run_migrations
+from app.db.sqlite_utils import check_sqlite_integrity, sqlite_db_path_from_url
 
 _settings = get_settings()
 
@@ -49,15 +51,14 @@ if _is_sqlite_url(_settings.database_url):
         engine = create_async_engine(
             _settings.database_url,
             echo=False,
+            poolclass=StaticPool,
             connect_args={"timeout": _SQLITE_BUSY_TIMEOUT_SECONDS},
         )
     else:
         engine = create_async_engine(
             _settings.database_url,
             echo=False,
-            pool_size=_settings.database_pool_size,
-            max_overflow=_settings.database_max_overflow,
-            pool_timeout=_settings.database_pool_timeout_seconds,
+            poolclass=NullPool,
             connect_args={"timeout": _SQLITE_BUSY_TIMEOUT_SECONDS},
         )
     _configure_sqlite_engine(engine.sync_engine, enable_wal=not is_sqlite_memory)
@@ -134,6 +135,26 @@ async def init_db() -> None:
     from app.db.models import Base
 
     _ensure_sqlite_dir(_settings.database_url)
+    sqlite_path = sqlite_db_path_from_url(_settings.database_url)
+    if sqlite_path is not None:
+        integrity = check_sqlite_integrity(sqlite_path)
+        if not integrity.ok:
+            details = integrity.details or "unknown error"
+            logger.error("SQLite integrity check failed path=%s details=%s", sqlite_path, details)
+            if "locked" in details.lower():
+                message = (
+                    f"SQLite integrity check failed for {sqlite_path} ({details}). "
+                    "Another instance may be running. Stop it and retry."
+                )
+            else:
+                message = (
+                    f"SQLite integrity check failed for {sqlite_path} ({details}). "
+                    "The database appears corrupted or the filesystem is unhealthy. "
+                    "Stop the app and run "
+                    f'`python -m app.db.recover --db "{sqlite_path}" --replace` '
+                    "or restore a backup from the same directory."
+                )
+            raise RuntimeError(message)
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

@@ -21,7 +21,7 @@ async def run(session: AsyncSession) -> None:
 
     if "totp_required_on_login" not in columns:
         await session.execute(
-            text("ALTER TABLE dashboard_settings ADD COLUMN totp_required_on_login BOOLEAN NOT NULL DEFAULT 0")
+            text("ALTER TABLE dashboard_settings ADD COLUMN totp_required_on_login BOOLEAN NOT NULL DEFAULT FALSE")
         )
 
     if "totp_secret_encrypted" not in columns:
@@ -30,3 +30,8 @@ async def run(session: AsyncSession) -> None:
 
     if "totp_last_verified_step" not in columns:
         await session.execute(text("ALTER TABLE dashboard_settings ADD COLUMN totp_last_verified_step INTEGER"))
+
+    if "totp_session_epoch" not in columns:
+        await session.execute(
+            text("ALTER TABLE dashboard_settings ADD COLUMN totp_session_epoch INTEGER NOT NULL DEFAULT 0")
+        )

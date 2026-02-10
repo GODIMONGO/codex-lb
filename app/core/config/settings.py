@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from ipaddress import ip_network
 from pathlib import Path
+from typing import Annotated
 
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parents[3]
 
@@ -36,6 +38,35 @@ DEFAULT_DB_PATH = DEFAULT_HOME_DIR / "store.db"
 DEFAULT_ENCRYPTION_KEY_FILE = DEFAULT_HOME_DIR / "encryption.key"
 
 
+def _normalize_csv_list(
+    value: object,
+    *,
+    lowercase: bool = False,
+    strip_trailing_dot: bool = False,
+) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        entries = [entry.strip() for entry in value.split(",")]
+    elif isinstance(value, list):
+        entries = [entry.strip() for entry in value if isinstance(entry, str)]
+    else:
+        raise TypeError("value must be a list or comma-separated string")
+
+    normalized: list[str] = []
+    for entry in entries:
+        if not entry:
+            continue
+        current = entry
+        if lowercase:
+            current = current.lower()
+        if strip_trailing_dot:
+            current = current.rstrip(".")
+        if current:
+            normalized.append(current)
+    return normalized
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="CODEX_LB_",
@@ -51,6 +82,7 @@ class Settings(BaseSettings):
     upstream_base_url: str = "https://chatgpt.com/backend-api"
     upstream_connect_timeout_seconds: float = 30.0
     stream_idle_timeout_seconds: float = 300.0
+    max_sse_event_bytes: int = Field(default=2 * 1024 * 1024, gt=0)
     auth_base_url: str = "https://auth.openai.com"
     oauth_client_id: str = "app_EMoamEEZ73f0CkXaXp7hrann"
     oauth_scope: str = "openid profile email"
@@ -63,14 +95,20 @@ class Settings(BaseSettings):
     usage_fetch_timeout_seconds: float = 10.0
     usage_fetch_max_retries: int = 2
     usage_refresh_enabled: bool = True
-    usage_refresh_interval_seconds: int = 60
+    usage_refresh_interval_seconds: int = Field(default=60, gt=0)
     encryption_key_file: Path = DEFAULT_ENCRYPTION_KEY_FILE
     database_migrations_fail_fast: bool = True
     firewall_trust_proxy_headers: bool = False
+    firewall_trusted_proxy_cidrs: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["127.0.0.1/32", "::1/128"]
+    )
     log_proxy_request_shape: bool = False
     log_proxy_request_shape_raw_cache_key: bool = False
     log_proxy_request_payload: bool = False
     max_decompressed_body_bytes: int = Field(default=32 * 1024 * 1024, gt=0)
+    image_inline_fetch_enabled: bool = True
+    image_inline_allowed_hosts: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    dashboard_setup_token: str | None = None
 
     @field_validator("database_url")
     @classmethod
@@ -90,6 +128,22 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return Path(value).expanduser()
         raise TypeError("encryption_key_file must be a path")
+
+    @field_validator("image_inline_allowed_hosts", mode="before")
+    @classmethod
+    def _normalize_image_inline_allowed_hosts(cls, value: object) -> list[str]:
+        return _normalize_csv_list(value, lowercase=True, strip_trailing_dot=True)
+
+    @field_validator("firewall_trusted_proxy_cidrs", mode="before")
+    @classmethod
+    def _normalize_firewall_trusted_proxy_cidrs(cls, value: object) -> list[str]:
+        cidrs = _normalize_csv_list(value)
+        for cidr in cidrs:
+            try:
+                ip_network(cidr, strict=False)
+            except ValueError as exc:
+                raise ValueError(f"Invalid firewall trusted proxy CIDR: {cidr}") from exc
+        return cidrs
 
 
 @lru_cache(maxsize=1)

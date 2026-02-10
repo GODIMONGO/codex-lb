@@ -100,6 +100,7 @@
 	};
 
 	const MODEL_OPTION_DELIMITER = ":::";
+	const DASHBOARD_SETUP_TOKEN_HEADER = "X-Codex-LB-Setup-Token";
 
 	const createDefaultRequestFilters = () => ({
 		search: "",
@@ -1233,16 +1234,25 @@
 		return payload;
 	};
 
-	const postJson = async (url, payload, label) => {
+	const postJson = async (url, payload, label, options = {}) => {
+		const headers = { "Content-Type": "application/json" };
+		if (options?.headers && typeof options.headers === "object") {
+			Object.assign(headers, options.headers);
+		}
 		const response = await fetch(url, {
 			method: "POST",
-			headers: { "Content-Type": "application/json" },
+			headers,
 			body: JSON.stringify(payload || {}),
 		});
 		const responsePayload = await readResponsePayload(response);
 		if (!response.ok) {
 			const message = extractErrorMessage(responsePayload);
-			throw new Error(message || `Failed to ${label} (${response.status})`);
+			const error = new Error(
+				message || `Failed to ${label} (${response.status})`,
+			);
+			error.status = response.status;
+			error.payload = responsePayload;
+			throw error;
 		}
 		return responsePayload;
 	};
@@ -1444,6 +1454,9 @@
 				preferEarlierResetAccounts: false,
 				totpRequiredOnLogin: false,
 				totpConfigured: false,
+				setupToken: "",
+				isLoading: false,
+				hasLoaded: false,
 				totpSetup: {
 					open: false,
 					secret: "",
@@ -1597,6 +1610,36 @@
 				this.refreshRequests();
 			},
 
+			async ensureRequestLogOptions() {
+				if (this.requestLogOptions.isLoading) {
+					return;
+				}
+				if (
+					Array.isArray(this.requestLogOptions.accountIds) &&
+					this.requestLogOptions.accountIds.length > 0 &&
+					Array.isArray(this.requestLogOptions.modelOptions) &&
+					this.requestLogOptions.modelOptions.length > 0
+				) {
+					return;
+				}
+				this.requestLogOptions.isLoading = true;
+				this.requestLogOptions.error = "";
+				try {
+					const payload = await fetchRequestLogOptions({});
+					this.requestLogOptions.accountIds = Array.isArray(payload?.accountIds)
+						? payload.accountIds
+						: [];
+					this.requestLogOptions.modelOptions = Array.isArray(payload?.modelOptions)
+						? payload.modelOptions
+						: [];
+				} catch (error) {
+					this.requestLogOptions.error =
+						error?.message || "Failed to load request log options.";
+				} finally {
+					this.requestLogOptions.isLoading = false;
+				}
+			},
+
 			resetFilters() {
 				this.filtersDraft = createDefaultRequestFilters();
 				this.applyFilters();
@@ -1709,12 +1752,35 @@
 					}
 				}
 			},
+			setupTokenOptions() {
+				const token = String(this.settings.setupToken || "").trim();
+				if (!token) {
+					return {};
+				}
+				return {
+					headers: {
+						[DASHBOARD_SETUP_TOKEN_HEADER]: token,
+					},
+				};
+			},
+			promptSetupToken() {
+				const rawToken = window.prompt(
+					"Enter dashboard setup token (CODEX_LB_DASHBOARD_SETUP_TOKEN).",
+				);
+				if (rawToken === null) {
+					return "";
+				}
+				const token = String(rawToken || "").trim();
+				this.settings.setupToken = token;
+				return token;
+			},
 			async setupTotp() {
 				try {
 					const started = await postJson(
 						API_ENDPOINTS.dashboardAuthTotpSetupStart,
 						{},
 						"start TOTP setup",
+						this.setupTokenOptions(),
 					);
 					this.settings.totpSetup.open = true;
 					this.settings.totpSetup.secret = started.secret || "";
@@ -1722,6 +1788,28 @@
 					this.settings.totpSetup.qrSvgDataUri = started.qrSvgDataUri || "";
 					this.settings.totpSetup.code = "";
 				} catch (error) {
+					const errorCode = String(error?.payload?.error?.code || "");
+					if (error?.status === 403 && errorCode === "dashboard_setup_forbidden") {
+						const token = this.promptSetupToken();
+						if (token) {
+							try {
+								const started = await postJson(
+									API_ENDPOINTS.dashboardAuthTotpSetupStart,
+									{},
+									"start TOTP setup",
+									this.setupTokenOptions(),
+								);
+								this.settings.totpSetup.open = true;
+								this.settings.totpSetup.secret = started.secret || "";
+								this.settings.totpSetup.otpauthUri = started.otpauthUri || "";
+								this.settings.totpSetup.qrSvgDataUri = started.qrSvgDataUri || "";
+								this.settings.totpSetup.code = "";
+								return;
+							} catch (retryError) {
+								error = retryError;
+							}
+						}
+					}
 					this.openMessageBox({
 						tone: "error",
 						title: "TOTP setup failed",
@@ -1760,6 +1848,7 @@
 						API_ENDPOINTS.dashboardAuthTotpSetupConfirm,
 						{ secret, code },
 						"confirm TOTP setup",
+						this.setupTokenOptions(),
 					);
 					this.settings.totpConfigured = true;
 					this.cancelTotpSetup();
@@ -1769,6 +1858,30 @@
 						message: "TOTP secret configured successfully.",
 					});
 				} catch (error) {
+					const errorCode = String(error?.payload?.error?.code || "");
+					if (error?.status === 403 && errorCode === "dashboard_setup_forbidden") {
+						const token = this.promptSetupToken();
+						if (token) {
+							try {
+								await postJson(
+									API_ENDPOINTS.dashboardAuthTotpSetupConfirm,
+									{ secret, code },
+									"confirm TOTP setup",
+									this.setupTokenOptions(),
+								);
+								this.settings.totpConfigured = true;
+								this.cancelTotpSetup();
+								this.openMessageBox({
+									tone: "success",
+									title: "TOTP enabled",
+									message: "TOTP secret configured successfully.",
+								});
+								return;
+							} catch (retryError) {
+								error = retryError;
+							}
+						}
+					}
 					this.openMessageBox({
 						tone: "error",
 						title: "TOTP setup failed",
@@ -1834,6 +1947,7 @@
 				const { preferredId, silent = false } = options;
 				this.requestLogOptions.isLoading = true;
 				this.requestLogOptions.error = "";
+				this.settings.isLoading = true;
 				this.refreshPromise = (async () => {
 					const params = buildRequestLogsQueryParams({
 						filters: this.filtersApplied,
@@ -1911,6 +2025,7 @@
 					if (settingsResult.status === "rejected") {
 						errors.push(settingsResult.reason);
 					}
+					this.settings.hasLoaded = settingsResult.status === "fulfilled";
 
 					const firewall =
 						firewallResult.status === "fulfilled" ? firewallResult.value : null;
@@ -1956,6 +2071,7 @@
 				} finally {
 					this.refreshPromise = null;
 					this.requestLogOptions.isLoading = false;
+					this.settings.isLoading = false;
 				}
 			},
 			applyData(data, preferredId) {
@@ -1993,6 +2109,9 @@
 						data.settings.totpRequiredOnLogin,
 					);
 					this.settings.totpConfigured = Boolean(data.settings.totpConfigured);
+					this.settings.hasLoaded = true;
+				} else {
+					this.settings.hasLoaded = false;
 				}
 				if (data.firewall) {
 					this.firewall.mode = data.firewall.mode;
@@ -2013,30 +2132,48 @@
 						preferEarlierResetAccounts: this.settings.preferEarlierResetAccounts,
 						totpRequiredOnLogin: this.settings.totpRequiredOnLogin,
 					};
-					const updated = await putJson(
-						API_ENDPOINTS.settings,
-						payload,
-						"save settings",
-					);
+					let updated;
+					try {
+						updated = await putJson(
+							API_ENDPOINTS.settings,
+							payload,
+							"save settings",
+						);
+					} catch (error) {
+						this.openMessageBox({
+							tone: "error",
+							title: "Settings save failed",
+							message: error.message || "Failed to save settings.",
+						});
+						return;
+					}
+
 					const normalized = normalizeSettingsPayload(updated);
 					this.settings.stickyThreadsEnabled = normalized.stickyThreadsEnabled;
 					this.settings.preferEarlierResetAccounts =
 						normalized.preferEarlierResetAccounts;
 					this.settings.totpRequiredOnLogin = normalized.totpRequiredOnLogin;
 					this.settings.totpConfigured = normalized.totpConfigured;
+
 					if (this.settings.totpRequiredOnLogin) {
-						await this.ensureDashboardAccess();
+						try {
+							await this.ensureDashboardAccess();
+						} catch (error) {
+							this.openMessageBox({
+								tone: "warning",
+								title: "Settings saved",
+								message:
+									error.message ||
+									"Settings were saved, but dashboard access verification was not completed.",
+							});
+							return;
+						}
 					}
+
 					this.openMessageBox({
 						tone: "success",
 						title: "Settings saved",
 						message: "Settings updated.",
-					});
-				} catch (error) {
-					this.openMessageBox({
-						tone: "error",
-						title: "Settings save failed",
-						message: error.message || "Failed to save settings.",
 					});
 				} finally {
 					this.settings.isSaving = false;

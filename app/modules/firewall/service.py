@@ -1,11 +1,27 @@
 from __future__ import annotations
 
 import ipaddress
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal
+from typing import Literal, Protocol
 
-from app.modules.firewall.repository import FirewallRepository
+
+class FirewallEntryLike(Protocol):
+    ip_address: str
+    created_at: datetime
+
+
+class FirewallRepositoryPort(Protocol):
+    async def list_entries(self) -> Sequence[FirewallEntryLike]: ...
+
+    async def list_ip_addresses(self) -> set[str]: ...
+
+    async def exists(self, ip_address: str) -> bool: ...
+
+    async def add(self, ip_address: str) -> FirewallEntryLike: ...
+
+    async def delete(self, ip_address: str) -> bool: ...
 
 
 class FirewallValidationError(ValueError):
@@ -29,7 +45,7 @@ class FirewallListData:
 
 
 class FirewallService:
-    def __init__(self, repository: FirewallRepository) -> None:
+    def __init__(self, repository: FirewallRepositoryPort) -> None:
         self._repository = repository
 
     async def list_ips(self) -> FirewallListData:
