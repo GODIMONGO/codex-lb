@@ -28,7 +28,7 @@ async def test_cannot_enable_totp_requirement_without_configured_secret(async_cl
 
 @pytest.mark.asyncio
 async def test_setup_start_requires_token_when_not_configured(async_client, monkeypatch):
-    monkeypatch.delenv("CODEX_LB_DASHBOARD_SETUP_TOKEN", raising=False)
+    monkeypatch.setenv("CODEX_LB_DASHBOARD_SETUP_TOKEN", "")
     from app.core.config.settings import get_settings
 
     get_settings.cache_clear()

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
+from typing import cast
 
+import aiohttp
 import pytest
 
 import app.core.clients.proxy as proxy_module
@@ -201,7 +203,7 @@ async def test_stream_responses_does_not_emit_stream_incomplete_after_response_i
             headers={},
             access_token="token",
             account_id=None,
-            session=_DummySession(Response()),
+            session=cast(aiohttp.ClientSession, _DummySession(Response())),
         )
     ]
 
