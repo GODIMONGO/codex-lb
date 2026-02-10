@@ -23,6 +23,7 @@ class SettingsRepository:
             totp_required_on_login=False,
             totp_secret_encrypted=None,
             totp_last_verified_step=None,
+            totp_session_epoch=0,
         )
         self._session.add(row)
         await self._session.commit()
