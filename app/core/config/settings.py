@@ -18,6 +18,9 @@ def _in_container() -> bool:
 
 def _default_home_dir() -> Path:
     if _in_container():
+        ptero_home = Path("/home/container")
+        if ptero_home.exists():
+            return ptero_home / ".codex-lb"
         return DOCKER_DATA_DIR
     return Path.home() / ".codex-lb"
 
