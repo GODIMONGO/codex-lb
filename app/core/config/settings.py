@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from ipaddress import ip_network
 from pathlib import Path
 from typing import Annotated
 
@@ -37,6 +38,35 @@ DEFAULT_DB_PATH = DEFAULT_HOME_DIR / "store.db"
 DEFAULT_ENCRYPTION_KEY_FILE = DEFAULT_HOME_DIR / "encryption.key"
 
 
+def _normalize_csv_list(
+    value: object,
+    *,
+    lowercase: bool = False,
+    strip_trailing_dot: bool = False,
+) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        entries = [entry.strip() for entry in value.split(",")]
+    elif isinstance(value, list):
+        entries = [entry.strip() for entry in value if isinstance(entry, str)]
+    else:
+        raise TypeError("value must be a list or comma-separated string")
+
+    normalized: list[str] = []
+    for entry in entries:
+        if not entry:
+            continue
+        current = entry
+        if lowercase:
+            current = current.lower()
+        if strip_trailing_dot:
+            current = current.rstrip(".")
+        if current:
+            normalized.append(current)
+    return normalized
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="CODEX_LB_",
@@ -69,6 +99,9 @@ class Settings(BaseSettings):
     encryption_key_file: Path = DEFAULT_ENCRYPTION_KEY_FILE
     database_migrations_fail_fast: bool = True
     firewall_trust_proxy_headers: bool = False
+    firewall_trusted_proxy_cidrs: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["127.0.0.1/32", "::1/128"]
+    )
     log_proxy_request_shape: bool = False
     log_proxy_request_shape_raw_cache_key: bool = False
     log_proxy_request_payload: bool = False
@@ -99,20 +132,18 @@ class Settings(BaseSettings):
     @field_validator("image_inline_allowed_hosts", mode="before")
     @classmethod
     def _normalize_image_inline_allowed_hosts(cls, value: object) -> list[str]:
-        if value is None:
-            return []
-        if isinstance(value, str):
-            entries = [entry.strip().lower().rstrip(".") for entry in value.split(",")]
-            return [entry for entry in entries if entry]
-        if isinstance(value, list):
-            normalized: list[str] = []
-            for entry in value:
-                if isinstance(entry, str):
-                    host = entry.strip().lower().rstrip(".")
-                    if host:
-                        normalized.append(host)
-            return normalized
-        raise TypeError("image_inline_allowed_hosts must be a list or comma-separated string")
+        return _normalize_csv_list(value, lowercase=True, strip_trailing_dot=True)
+
+    @field_validator("firewall_trusted_proxy_cidrs", mode="before")
+    @classmethod
+    def _normalize_firewall_trusted_proxy_cidrs(cls, value: object) -> list[str]:
+        cidrs = _normalize_csv_list(value)
+        for cidr in cidrs:
+            try:
+                ip_network(cidr, strict=False)
+            except ValueError as exc:
+                raise ValueError(f"Invalid firewall trusted proxy CIDR: {cidr}") from exc
+        return cidrs
 
 
 @lru_cache(maxsize=1)

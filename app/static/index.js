@@ -1444,6 +1444,8 @@
 				preferEarlierResetAccounts: false,
 				totpRequiredOnLogin: false,
 				totpConfigured: false,
+				isLoading: false,
+				hasLoaded: false,
 				totpSetup: {
 					open: false,
 					secret: "",
@@ -1595,6 +1597,36 @@
 					statuses,
 				};
 				this.refreshRequests();
+			},
+
+			async ensureRequestLogOptions() {
+				if (this.requestLogOptions.isLoading) {
+					return;
+				}
+				if (
+					Array.isArray(this.requestLogOptions.accountIds) &&
+					this.requestLogOptions.accountIds.length > 0 &&
+					Array.isArray(this.requestLogOptions.modelOptions) &&
+					this.requestLogOptions.modelOptions.length > 0
+				) {
+					return;
+				}
+				this.requestLogOptions.isLoading = true;
+				this.requestLogOptions.error = "";
+				try {
+					const payload = await fetchRequestLogOptions({});
+					this.requestLogOptions.accountIds = Array.isArray(payload?.accountIds)
+						? payload.accountIds
+						: [];
+					this.requestLogOptions.modelOptions = Array.isArray(payload?.modelOptions)
+						? payload.modelOptions
+						: [];
+				} catch (error) {
+					this.requestLogOptions.error =
+						error?.message || "Failed to load request log options.";
+				} finally {
+					this.requestLogOptions.isLoading = false;
+				}
 			},
 
 			resetFilters() {
@@ -1834,6 +1866,7 @@
 				const { preferredId, silent = false } = options;
 				this.requestLogOptions.isLoading = true;
 				this.requestLogOptions.error = "";
+				this.settings.isLoading = true;
 				this.refreshPromise = (async () => {
 					const params = buildRequestLogsQueryParams({
 						filters: this.filtersApplied,
@@ -1911,6 +1944,7 @@
 					if (settingsResult.status === "rejected") {
 						errors.push(settingsResult.reason);
 					}
+					this.settings.hasLoaded = settingsResult.status === "fulfilled";
 
 					const firewall =
 						firewallResult.status === "fulfilled" ? firewallResult.value : null;
@@ -1956,6 +1990,7 @@
 				} finally {
 					this.refreshPromise = null;
 					this.requestLogOptions.isLoading = false;
+					this.settings.isLoading = false;
 				}
 			},
 			applyData(data, preferredId) {
@@ -1993,6 +2028,9 @@
 						data.settings.totpRequiredOnLogin,
 					);
 					this.settings.totpConfigured = Boolean(data.settings.totpConfigured);
+					this.settings.hasLoaded = true;
+				} else {
+					this.settings.hasLoaded = false;
 				}
 				if (data.firewall) {
 					this.firewall.mode = data.firewall.mode;

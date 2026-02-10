@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from typing import cast
 
 import pytest
 
@@ -43,8 +44,9 @@ def test_main_allows_certfile_without_keyfile(monkeypatch: pytest.MonkeyPatch) -
 
     cli.main()
 
-    run_kwargs = captured["kwargs"]
-    assert isinstance(run_kwargs, dict)
+    run_kwargs_raw = captured["kwargs"]
+    assert isinstance(run_kwargs_raw, dict)
+    run_kwargs = cast(dict[str, object], run_kwargs_raw)
     assert run_kwargs["ssl_certfile"] == "server.pem"
     assert run_kwargs["ssl_keyfile"] is None
 

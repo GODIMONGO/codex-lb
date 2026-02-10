@@ -178,3 +178,20 @@ def test_settings_parses_image_inline_allowlist_from_csv(monkeypatch):
     settings = Settings()
 
     assert settings.image_inline_allowed_hosts == ["a.example", "b.example", "c.example"]
+
+
+def test_settings_parses_firewall_trusted_proxy_cidrs_from_csv(monkeypatch):
+    monkeypatch.setenv("CODEX_LB_FIREWALL_TRUSTED_PROXY_CIDRS", "127.0.0.1/32, 10.0.0.0/8")
+    from app.core.config.settings import Settings
+
+    settings = Settings()
+
+    assert settings.firewall_trusted_proxy_cidrs == ["127.0.0.1/32", "10.0.0.0/8"]
+
+
+def test_settings_rejects_invalid_firewall_trusted_proxy_cidr(monkeypatch):
+    monkeypatch.setenv("CODEX_LB_FIREWALL_TRUSTED_PROXY_CIDRS", "not-a-cidr")
+    from app.core.config.settings import Settings
+
+    with pytest.raises(ValueError):
+        Settings()

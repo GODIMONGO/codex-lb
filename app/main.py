@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -32,18 +32,23 @@ from app.modules.usage import api as usage_api
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    await init_db()
-    await init_http_client()
-    scheduler = build_usage_refresh_scheduler()
-    await scheduler.start()
-
+    scheduler = None
+    db_ready = False
+    http_ready = False
     try:
+        await init_db()
+        db_ready = True
+        await init_http_client()
+        http_ready = True
+        scheduler = build_usage_refresh_scheduler()
+        await scheduler.start()
         yield
     finally:
-        await scheduler.stop()
-        try:
+        if scheduler is not None:
+            await scheduler.stop()
+        if http_ready:
             await close_http_client()
-        finally:
+        if db_ready:
             await close_db()
 
 
@@ -72,24 +77,29 @@ def create_app() -> FastAPI:
 
     static_dir = Path(__file__).parent / "static"
     index_html = static_dir / "index.html"
+    has_spa_assets = static_dir.is_dir() and index_html.is_file()
 
     @app.get("/", include_in_schema=False)
     async def root_redirect():
+        if not has_spa_assets:
+            raise HTTPException(status_code=404, detail="Dashboard assets are not available")
         return RedirectResponse(url="/dashboard", status_code=302)
 
-    @app.get("/accounts", include_in_schema=False)
-    async def spa_accounts():
-        return FileResponse(index_html, media_type="text/html")
+    if has_spa_assets:
 
-    @app.get("/settings", include_in_schema=False)
-    async def spa_settings():
-        return FileResponse(index_html, media_type="text/html")
+        @app.get("/accounts", include_in_schema=False)
+        async def spa_accounts():
+            return FileResponse(index_html, media_type="text/html")
 
-    @app.get("/firewall", include_in_schema=False)
-    async def spa_firewall():
-        return FileResponse(index_html, media_type="text/html")
+        @app.get("/settings", include_in_schema=False)
+        async def spa_settings():
+            return FileResponse(index_html, media_type="text/html")
 
-    app.mount("/dashboard", StaticFiles(directory=static_dir, html=True), name="dashboard")
+        @app.get("/firewall", include_in_schema=False)
+        async def spa_firewall():
+            return FileResponse(index_html, media_type="text/html")
+
+        app.mount("/dashboard", StaticFiles(directory=static_dir, html=True), name="dashboard")
 
     return app
 

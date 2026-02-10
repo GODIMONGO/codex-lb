@@ -41,4 +41,5 @@ class DashboardAuthRepository:
             .values(totp_last_verified_step=step)
         )
         await self._session.commit()
-        return bool(result.rowcount and result.rowcount > 0)
+        rowcount_value = getattr(result, "rowcount", None)
+        return isinstance(rowcount_value, int) and rowcount_value > 0
